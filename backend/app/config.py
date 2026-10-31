@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     apify_token: str = ''
     apify_actor_id: str = ''
     apify_input_query_field: str = 'query'
+    apify_timeout_secs: int = 120
+    apify_max_items: int = 50
+    worker_poll_seconds: int = 10
     ai_provider: str = 'disabled'
 
 @lru_cache

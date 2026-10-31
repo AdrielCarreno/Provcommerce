@@ -38,26 +38,38 @@ def test_apify_async_requests_mocked(monkeypatch):
     assert calls[0].content == b'{"keyword":"cafe"}'
     assert calls[0].headers['authorization']=='Bearer test-token'
 
-def test_search_run_completed_and_failed(monkeypatch):
-    import app.main as api
+def test_worker_imports_and_handles_failure(monkeypatch):
+    import app.worker as worker
     records=[]
     async def fake_db(method, table, user, **kw):
-        records.append((method,table,kw))
-        if method=='GET' and table=='search_runs': return [{'id':'search1','status':'processing','actor_run_id':'run1'}]
-        if method=='GET': return [{'title':'Producto de prueba','url':'https://example.com/p','source':'Apify'}]
-        return None
+        records.append((method,table,user,kw))
     async def success(self, run_id):
         return 'SUCCEEDED', normalize([{'title':'Producto de prueba','url':'https://example.com/p'}])
-    monkeypatch.setattr(api, 'db', fake_db)
+    monkeypatch.setattr(worker, 'db', fake_db)
     monkeypatch.setattr(ApifySource, 'status', success)
+    run={'id':'search1','user_id':'user1','actor_run_id':'run1'}
+    asyncio.run(worker.process(run))
+    assert records[0][1]=='search_results' and records[0][2]['id']=='user1'
+    assert records[1][3]['payload']['status']=='completed'
+    async def failure(self, run_id): return 'FAILED', []
+    monkeypatch.setattr(ApifySource, 'status', failure)
+    asyncio.run(worker.process(run))
+    assert records[-1][3]['payload']['status']=='failed'
+
+def test_auth_rejects_invalid_session(monkeypatch):
+    import app.main as api
+    monkeypatch.setattr(api, 'settings', lambda: Settings(supabase_url='https://example.com',supabase_anon_key='anon'))
+    original=httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(lambda request: httpx.Response(401)), **kwargs))
+    assert client.get('/searches/00000000-0000-0000-0000-000000000001',headers={'Authorization':'Bearer invalid'}).status_code==401
+    assert client.get('/searches/00000000-0000-0000-0000-000000000001').status_code==401
+
+def test_get_search_cannot_read_another_user(monkeypatch):
+    import app.main as api
+    async def fake_db(method, table, user, **kwargs):
+        assert user['id']=='user1'
+        return []
+    monkeypatch.setattr(api,'db',fake_db)
     app.dependency_overrides[current_user]=lambda:{'id':'user1','authorization':'Bearer test'}
-    try:
-        response=client.get('/searches/search1')
-        assert response.status_code==200 and response.json()['status']=='completed'
-        assert response.json()['results'][0]['title']=='Producto de prueba'
-        assert any(table=='search_results' and method=='POST' for method,table,_ in records)
-        async def failure(self, run_id): return 'FAILED', []
-        monkeypatch.setattr(ApifySource, 'status', failure)
-        response=client.get('/searches/search1')
-        assert response.json()['status']=='failed'
+    try: assert client.get('/searches/00000000-0000-0000-0000-000000000001').status_code==404
     finally: app.dependency_overrides.clear()

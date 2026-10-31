@@ -1,5 +1,6 @@
 from typing import Annotated
 import logging
+from uuid import UUID
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -44,6 +45,10 @@ async def db(method, table, user, *, params=None, payload=None, prefer=None):
             response = await client.request(method, f'{config.supabase_url.rstrip("/")}/rest/v1/{table}', headers=headers, params=params, json=payload)
             response.raise_for_status()
             return response.json() if response.content else None
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409: raise HTTPException(409, 'Ya existe una búsqueda activa para esta consulta.') from exc
+        log.warning('Supabase operation failed: HTTP %s', exc.response.status_code)
+        raise HTTPException(503, 'No se pudo acceder al almacenamiento de búsquedas.') from exc
     except (httpx.HTTPError, ValueError) as exc:
         log.warning('Supabase operation failed: %s', type(exc).__name__)
         raise HTTPException(503, 'No se pudo acceder al almacenamiento de búsquedas.') from exc
@@ -63,31 +68,16 @@ async def create_search(body: SearchRequest, user: dict = Depends(current_user))
         run.update(actor_run_id=actor_run, status='processing')
         log.info('Search %s started', run['id'])
     except (httpx.HTTPError, SourceError, KeyError, ValueError):
-        await db('PATCH', 'search_runs', user, params={'id':f'eq.{run["id"]}'}, payload={'status':'failed','error':'No se pudo iniciar la ejecución de Apify.'})
-        log.warning('Search %s could not start', run['id'])
-        raise HTTPException(502, 'No se pudo iniciar la ejecución de Apify.')
+        # An uncertain response can still mean the paid run started.
+        log.warning('Search %s has an uncertain start; manual reconciliation required', run['id'])
+        raise HTTPException(502, 'Inicio incierto. No repitas la búsqueda; revisa las ejecuciones en Apify.')
     return run
 
 @app.get('/searches/{search_id}')
-async def get_search(search_id: str, user: dict = Depends(current_user)):
+async def get_search(search_id: UUID, user: dict = Depends(current_user)):
+    search_id = str(search_id)
     rows = await db('GET', 'search_runs', user, params={'id':f'eq.{search_id}', 'select':'*'})
     if not rows: raise HTTPException(404, 'Búsqueda no encontrada.')
     run = rows[0]
-    if run['status'] == 'processing' and run.get('actor_run_id'):
-        try:
-            status, results = await ApifySource(settings()).status(run['actor_run_id'])
-            if status == 'SUCCEEDED':
-                if results:
-                    await db('POST', 'search_results', user, params={'on_conflict':'search_id,url'}, payload=[dict(r.model_dump(mode='json'), search_id=run['id'], user_id=user['id']) for r in results], prefer='resolution=ignore-duplicates,return=minimal')
-                await db('PATCH', 'search_runs', user, params={'id':f'eq.{search_id}'}, payload={'status':'completed'})
-                run['status'] = 'completed'
-                log.info('Search %s completed with %d results', search_id, len(results))
-            elif status in ('FAILED','ABORTED','TIMED-OUT'):
-                await db('PATCH', 'search_runs', user, params={'id':f'eq.{search_id}'}, payload={'status':'failed','error':'La ejecución de Apify terminó sin éxito.'})
-                run.update(status='failed', error='La ejecución de Apify terminó sin éxito.')
-                log.warning('Search %s failed with status %s', search_id, status)
-        except (httpx.HTTPError, SourceError, KeyError, ValueError):
-            log.warning('Search %s: unable to retrieve run status', search_id)
-            raise HTTPException(502, 'No se pudo consultar Apify; vuelve a intentarlo.')
     run['results'] = await db('GET', 'search_results', user, params={'search_id':f'eq.{search_id}', 'select':'*'}) if run['status']=='completed' else []
     return run

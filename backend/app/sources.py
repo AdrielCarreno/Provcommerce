@@ -1,5 +1,6 @@
 """Apify adapter. Actor input and output vary by Actor; see README."""
 import re
+import asyncio
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
@@ -60,20 +61,30 @@ class ApifySource:
     async def start(self, query):
         actor = quote(self.config.apify_actor_id.replace('/', '~'), safe='~')
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(f'https://api.apify.com/v2/acts/{actor}/runs', headers=self._headers(), json={self.config.apify_input_query_field: query})
+            response = await client.post(f'https://api.apify.com/v2/acts/{actor}/runs', headers=self._headers(), params={'timeout': max(10, min(self.config.apify_timeout_secs, 300))}, json={self.config.apify_input_query_field: query})
             response.raise_for_status()
             data = response.json()['data']
             return data['id']
     async def status(self, run_id):
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(f'https://api.apify.com/v2/actor-runs/{quote(run_id, safe="")}', headers=self._headers())
+            response = await self._get(client, f'https://api.apify.com/v2/actor-runs/{quote(run_id, safe="")}')
             response.raise_for_status()
             data = response.json()['data']
             if data['status'] != 'SUCCEEDED': return data['status'], []
             dataset = data.get('defaultDatasetId')
             if not dataset: raise SourceError('La ejecución no proporcionó un dataset.')
-            response = await client.get(f'https://api.apify.com/v2/datasets/{quote(dataset, safe="")}/items', headers=self._headers(), params={'limit': 1000, 'clean': 'true'})
+            response = await self._get(client, f'https://api.apify.com/v2/datasets/{quote(dataset, safe="")}/items', params={'limit': max(1, min(self.config.apify_max_items, 1000)), 'clean': 'true'})
             response.raise_for_status()
             items = response.json()
             if not isinstance(items, list): raise SourceError('Formato de dataset inválido.')
             return 'SUCCEEDED', normalize(items)
+
+    async def _get(self, client, url, params=None):
+        for attempt in range(3):
+            try:
+                response = await client.get(url, headers=self._headers(), params=params)
+                if response.status_code not in (429, 500, 502, 503, 504) or attempt == 2:
+                    return response
+            except (httpx.TimeoutException, httpx.NetworkError):
+                if attempt == 2: raise
+            await asyncio.sleep(2 ** attempt)
