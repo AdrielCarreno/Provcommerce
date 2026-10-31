@@ -1,0 +1,5 @@
+@tailwind base; @tailwind components; @tailwind utilities;
+body { color:#182923; background:#f7f8f4; } * { box-sizing:border-box; }
+.btn { @apply inline-flex items-center justify-center rounded-lg bg-[#204f3e] px-5 py-3 text-sm font-semibold text-white hover:bg-[#163b2e] transition; }
+.card { @apply rounded-2xl border border-[#e2e9e2] bg-white shadow-sm; }
+.field { @apply w-full rounded-lg border border-[#dbe4dc] bg-white px-4 py-3 outline-none focus:border-[#418569] focus:ring-2 focus:ring-[#d6eadb]; }
