@@ -73,3 +73,13 @@ def test_get_search_cannot_read_another_user(monkeypatch):
     app.dependency_overrides[current_user]=lambda:{'id':'user1','authorization':'Bearer test'}
     try: assert client.get('/searches/00000000-0000-0000-0000-000000000001').status_code==404
     finally: app.dependency_overrides.clear()
+
+def test_in_progress_run_is_rotated_without_completing(monkeypatch):
+    import app.worker as worker
+    records = []
+    async def fake_db(method, table, user, **kwargs): records.append(kwargs)
+    async def running(self, run_id): return 'TIMING-OUT', []
+    monkeypatch.setattr(worker, 'db', fake_db)
+    monkeypatch.setattr(ApifySource, 'status', running)
+    asyncio.run(worker.process({'id':'search1','user_id':'user1','actor_run_id':'run1'}))
+    assert records[0]['payload'] == {'worker_failures':0}

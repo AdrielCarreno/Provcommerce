@@ -4,7 +4,7 @@ import logging
 import httpx
 from .config import settings
 from .main import db
-from .sources import ApifySource, SourceError
+from .sources import ApifySource
 
 log = logging.getLogger('provcommerce.worker')
 
@@ -15,14 +15,19 @@ async def process(run):
         if results:
             await db('POST', 'search_results', user, params={'on_conflict':'search_id,url'}, payload=[dict(r.model_dump(mode='json'), search_id=run['id'], user_id=user['id']) for r in results], prefer='resolution=ignore-duplicates,return=minimal')
         await db('PATCH','search_runs',user,params={'id':f'eq.{run["id"]}','status':'eq.processing'},payload={'status':'completed'})
+    elif status in ('READY', 'RUNNING', 'ABORTING', 'TIMING-OUT'):
+        # Refresh ordering so a large queue does not starve newer runs.
+        await db('PATCH','search_runs',user,params={'id':f'eq.{run["id"]}','status':'eq.processing'},payload={'worker_failures':0})
     elif status in ('FAILED','ABORTED','TIMED-OUT'):
         await db('PATCH','search_runs',user,params={'id':f'eq.{run["id"]}','status':'eq.processing'},payload={'status':'failed','error':'La ejecución de Apify terminó sin éxito.'})
+    else:
+        raise ValueError('Estado de Apify desconocido')
 
 async def tick():
     config = settings()
     if not config.supabase_url or not config.supabase_service_role_key: raise RuntimeError('Falta configuración de Supabase en el worker.')
     async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(f'{config.supabase_url.rstrip("/")}/rest/v1/search_runs', headers={'apikey':config.supabase_service_role_key,'Authorization':f'Bearer {config.supabase_service_role_key}'}, params={'status':'eq.processing','actor_run_id':'not.is.null','select':'id,user_id,actor_run_id,worker_failures','limit':'100','order':'updated_at.asc'})
+        response = await client.get(f'{config.supabase_url.rstrip("/")}/rest/v1/search_runs', headers={'apikey':config.supabase_service_role_key,'Authorization':f'Bearer {config.supabase_service_role_key}'}, params={'status':'eq.processing','worker_failures':'lt.3','actor_run_id':'not.is.null','select':'id,user_id,actor_run_id,worker_failures','limit':'100','order':'updated_at.asc'})
         response.raise_for_status()
         runs = response.json()
     for run in runs:
@@ -32,7 +37,7 @@ async def tick():
             log.warning('Search %s could not be processed: %s', run['id'], type(exc).__name__)
             failures = run['worker_failures'] + 1
             update = {'worker_failures': failures}
-            if failures >= 3: update.update(status='failed', error='No se pudo importar la ejecución; revisa Apify antes de reintentar.')
+            if failures >= 3: update['error'] = 'No se pudo consultar la ejecución; revisa Apify antes de reintentar.'
             try:
                 await db('PATCH', 'search_runs', {'id':run['user_id']}, params={'id':f'eq.{run["id"]}', 'status':'eq.processing'}, payload=update)
             except Exception as update_error:

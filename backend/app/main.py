@@ -46,7 +46,7 @@ async def db(method, table, user, *, params=None, payload=None, prefer=None):
             response.raise_for_status()
             return response.json() if response.content else None
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 409: raise HTTPException(409, 'Ya existe una búsqueda activa para esta consulta.') from exc
+        if exc.response.status_code == 409: raise HTTPException(409, 'Ya existe una búsqueda activa para esta cuenta.') from exc
         log.warning('Supabase operation failed: HTTP %s', exc.response.status_code)
         raise HTTPException(503, 'No se pudo acceder al almacenamiento de búsquedas.') from exc
     except (httpx.HTTPError, ValueError) as exc:
@@ -67,7 +67,7 @@ async def create_search(body: SearchRequest, user: dict = Depends(current_user))
         await db('PATCH', 'search_runs', user, params={'id':f'eq.{run["id"]}'}, payload={'actor_run_id':actor_run, 'status':'processing'})
         run.update(actor_run_id=actor_run, status='processing')
         log.info('Search %s started', run['id'])
-    except (httpx.HTTPError, SourceError, KeyError, ValueError):
+    except (httpx.HTTPError, SourceError, KeyError, ValueError, HTTPException):
         # An uncertain response can still mean the paid run started.
         log.warning('Search %s has an uncertain start; manual reconciliation required', run['id'])
         raise HTTPException(502, 'Inicio incierto. No repitas la búsqueda; revisa las ejecuciones en Apify.')
